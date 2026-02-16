@@ -1,27 +1,27 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generate } from "@/lib/claude";
-import { v4 as uuid } from "uuid";
 
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const db = getDb();
-  const bs = db
-    .prepare(
-      "SELECT * FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1"
-    )
-    .get(id) as { id: string; content_json: string } | undefined;
+  const db = await getDb();
 
-  if (!bs) {
+  const { rows } = await db.execute({
+    sql: "SELECT * FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+    args: [id],
+  });
+
+  if (!rows[0]) {
     return NextResponse.json(null);
   }
 
+  const row = rows[0];
   return NextResponse.json({
-    ...bs,
-    content_json: JSON.parse(bs.content_json),
+    ...row,
+    content_json: typeof row.content_json === "string" ? JSON.parse(row.content_json as string) : row.content_json,
   });
 }
 
@@ -30,15 +30,16 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const db = getDb();
+  const db = await getDb();
 
-  const answers = db
-    .prepare("SELECT question_key, answer FROM discovery_answers WHERE project_id = ?")
-    .all(id) as Array<{ question_key: string; answer: string }>;
+  const { rows: answerRows } = await db.execute({
+    sql: "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?",
+    args: [id],
+  });
 
   const discoveryMap: Record<string, string> = {};
-  for (const a of answers) {
-    discoveryMap[a.question_key] = a.answer;
+  for (const a of answerRows) {
+    discoveryMap[a.question_key as string] = a.answer as string;
   }
 
   const result = await generate({
@@ -56,12 +57,22 @@ export async function POST(
     parsed = { raw: result };
   }
 
-  const bsId = uuid();
-  db.prepare(
-    "INSERT INTO brandscripts (id, project_id, content_json) VALUES (?, ?, ?)"
-  ).run(bsId, id, JSON.stringify(parsed));
+  const bsId = crypto.randomUUID();
+  await db.execute({
+    sql: "INSERT INTO brandscripts (id, project_id, content_json) VALUES (?, ?, ?)",
+    args: [bsId, id, JSON.stringify(parsed)],
+  });
 
-  return NextResponse.json({ id: bsId, project_id: id, content_json: parsed });
+  const { rows } = await db.execute({
+    sql: "SELECT * FROM brandscripts WHERE id = ?",
+    args: [bsId],
+  });
+
+  const bs = rows[0];
+  return NextResponse.json({
+    ...bs,
+    content_json: typeof bs.content_json === "string" ? JSON.parse(bs.content_json as string) : bs.content_json,
+  });
 }
 
 export async function PUT(
@@ -70,23 +81,23 @@ export async function PUT(
 ) {
   const { id } = await params;
   const { content_json } = await request.json();
-  const db = getDb();
+  const db = await getDb();
 
-  const existing = db
-    .prepare(
-      "SELECT id FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1"
-    )
-    .get(id) as { id: string } | undefined;
+  const { rows: existing } = await db.execute({
+    sql: "SELECT id FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+    args: [id],
+  });
 
-  if (existing) {
-    db.prepare("UPDATE brandscripts SET content_json = ? WHERE id = ?").run(
-      JSON.stringify(content_json),
-      existing.id
-    );
+  if (existing[0]) {
+    await db.execute({
+      sql: "UPDATE brandscripts SET content_json = ? WHERE id = ?",
+      args: [JSON.stringify(content_json), existing[0].id as string],
+    });
   } else {
-    db.prepare(
-      "INSERT INTO brandscripts (id, project_id, content_json) VALUES (?, ?, ?)"
-    ).run(uuid(), id, JSON.stringify(content_json));
+    await db.execute({
+      sql: "INSERT INTO brandscripts (id, project_id, content_json) VALUES (?, ?, ?)",
+      args: [crypto.randomUUID(), id, JSON.stringify(content_json)],
+    });
   }
 
   return NextResponse.json({ ok: true });

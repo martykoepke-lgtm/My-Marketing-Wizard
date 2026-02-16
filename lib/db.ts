@@ -1,17 +1,24 @@
-import Database from "better-sqlite3";
-import path from "path";
+import { createClient, type Client } from "@libsql/client";
 import { initSchema } from "./schema";
 
-const DB_PATH = path.join(process.cwd(), "data", "marketing-wizard.db");
+let _client: Client | null = null;
+let _schemaReady: Promise<void> | null = null;
 
-let _db: Database.Database | null = null;
-
-export function getDb(): Database.Database {
-  if (!_db) {
-    _db = new Database(DB_PATH);
-    _db.pragma("journal_mode = WAL");
-    _db.pragma("foreign_keys = ON");
-    initSchema(_db);
+function getClient(): Client {
+  if (!_client) {
+    _client = createClient({
+      url: process.env.TURSO_DATABASE_URL!,
+      authToken: process.env.TURSO_AUTH_TOKEN,
+    });
   }
-  return _db;
+  return _client;
+}
+
+export async function getDb(): Promise<Client> {
+  const client = getClient();
+  if (!_schemaReady) {
+    _schemaReady = initSchema(client);
+  }
+  await _schemaReady;
+  return client;
 }

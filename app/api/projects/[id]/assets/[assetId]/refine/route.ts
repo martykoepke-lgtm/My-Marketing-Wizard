@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generate } from "@/lib/claude";
-import { v4 as uuid } from "uuid";
 import type { AssetType } from "@/lib/prompts";
 
 export async function POST(
@@ -10,65 +9,60 @@ export async function POST(
 ) {
   const { id, assetId } = await params;
   const { message } = await request.json();
-  const db = getDb();
+  const db = await getDb();
 
-  // Get the current asset
-  const asset = db
-    .prepare("SELECT * FROM assets WHERE id = ? AND project_id = ?")
-    .get(assetId, id) as {
-    asset_type: string;
-    content: string;
-  } | undefined;
+  const { rows: assetRows } = await db.execute({
+    sql: "SELECT * FROM assets WHERE id = ? AND project_id = ?",
+    args: [assetId, id],
+  });
 
+  const asset = assetRows[0];
   if (!asset) {
     return NextResponse.json({ error: "Asset not found" }, { status: 404 });
   }
 
   // Get brandscript
-  const bs = db
-    .prepare(
-      "SELECT content_json FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1"
-    )
-    .get(id) as { content_json: string } | undefined;
+  const { rows: bsRows } = await db.execute({
+    sql: "SELECT content_json FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+    args: [id],
+  });
 
   let brandscript: Record<string, unknown> = {};
-  if (bs) {
-    try {
-      brandscript = JSON.parse(bs.content_json);
-    } catch {}
+  if (bsRows[0]) {
+    try { brandscript = JSON.parse(bsRows[0].content_json as string); } catch { /* empty */ }
   }
 
-  // Get existing conversation
-  const conversations = db
-    .prepare(
-      "SELECT role, message FROM conversations WHERE asset_id = ? ORDER BY created_at ASC"
-    )
-    .all(assetId) as Array<{ role: string; message: string }>;
+  // Get conversation history
+  const { rows: convRows } = await db.execute({
+    sql: "SELECT role, message FROM conversations WHERE asset_id = ? ORDER BY created_at ASC",
+    args: [assetId],
+  });
 
-  const chatHistory = conversations.map((c) => ({
+  const chatHistory = convRows.map((c) => ({
     role: c.role as "user" | "assistant",
-    content: c.message,
+    content: c.message as string,
   }));
 
   // Save user message
-  db.prepare(
-    "INSERT INTO conversations (id, project_id, asset_id, role, message) VALUES (?, ?, ?, ?, ?)"
-  ).run(uuid(), id, assetId, "user", message);
+  await db.execute({
+    sql: "INSERT INTO conversations (id, project_id, asset_id, role, message) VALUES (?, ?, ?, ?, ?)",
+    args: [crypto.randomUUID(), id, assetId, "user", message],
+  });
 
-  // Generate refinement
   const result = await generate({
     task: "refine",
     assetType: asset.asset_type as AssetType,
     brandscript,
-    currentAsset: asset.content,
+    currentAsset: asset.content as string,
     chatHistory,
     userMessage: message,
   });
 
   // Save assistant response
-  db.prepare(
-    "INSERT INTO conversations (id, project_id, asset_id, role, message) VALUES (?, ?, ?, ?, ?)"
-  ).run(uuid(), id, assetId, "assistant", result);
+  await db.execute({
+    sql: "INSERT INTO conversations (id, project_id, asset_id, role, message) VALUES (?, ?, ?, ?, ?)",
+    args: [crypto.randomUUID(), id, assetId, "assistant", result],
+  });
 
   return NextResponse.json({ role: "assistant", message: result });
 }

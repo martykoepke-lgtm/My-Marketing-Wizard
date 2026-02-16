@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generate } from "@/lib/claude";
-import { v4 as uuid } from "uuid";
 import {
   KEY_TO_STEP,
   computeCoverage,
@@ -13,39 +12,38 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const db = getDb();
+  const db = await getDb();
 
-  const messages = db
-    .prepare(
-      "SELECT role, message, parsed_fields, created_at FROM story_sessions WHERE project_id = ? ORDER BY created_at ASC"
-    )
-    .all(id) as Array<{
-    role: string;
-    message: string;
-    parsed_fields: string | null;
-    created_at: string;
-  }>;
+  const { rows: messages } = await db.execute({
+    sql: "SELECT role, message, parsed_fields, created_at FROM story_sessions WHERE project_id = ? ORDER BY created_at ASC",
+    args: [id],
+  });
 
-  const answers = db
-    .prepare(
-      "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?"
-    )
-    .all(id) as Array<{ question_key: string; answer: string }>;
+  const { rows: answerRows } = await db.execute({
+    sql: "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?",
+    args: [id],
+  });
 
   const answerMap: Record<string, string> = {};
-  for (const a of answers) {
-    answerMap[a.question_key] = a.answer;
+  for (const a of answerRows) {
+    answerMap[a.question_key as string] = a.answer as string;
   }
 
   const coverage = computeCoverage(answerMap);
 
   return NextResponse.json({
-    messages: messages.map((m) => ({
-      role: m.role,
-      message: m.message,
-      parsedFields: m.parsed_fields ? JSON.parse(m.parsed_fields) : null,
-      createdAt: m.created_at,
-    })),
+    messages: messages.map((m) => {
+      let parsedFields = null;
+      if (m.parsed_fields) {
+        try { parsedFields = JSON.parse(m.parsed_fields as string); } catch { /* empty */ }
+      }
+      return {
+        role: m.role,
+        message: m.message,
+        parsedFields,
+        createdAt: m.created_at,
+      };
+    }),
     coverage,
   });
 }
@@ -90,19 +88,17 @@ export async function POST(
 ) {
   const { id } = await params;
   const { message } = await request.json();
-  const db = getDb();
+  const db = await getDb();
 
   // Load chat history
-  const history = db
-    .prepare(
-      "SELECT role, message FROM story_sessions WHERE project_id = ? ORDER BY created_at ASC"
-    )
-    .all(id) as Array<{ role: string; message: string }>;
+  const { rows: historyRows } = await db.execute({
+    sql: "SELECT role, message FROM story_sessions WHERE project_id = ? ORDER BY created_at ASC",
+    args: [id],
+  });
 
-  // Truncate long conversations: keep first 2 + last 30
-  let chatHistory = history.map((h) => ({
+  let chatHistory = historyRows.map((h) => ({
     role: h.role as "user" | "assistant",
-    content: h.message,
+    content: h.message as string,
   }));
   if (chatHistory.length > 40) {
     chatHistory = [
@@ -111,16 +107,15 @@ export async function POST(
     ];
   }
 
-  // Load current discovery answers
-  const answers = db
-    .prepare(
-      "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?"
-    )
-    .all(id) as Array<{ question_key: string; answer: string }>;
+  // Load current answers for coverage
+  const { rows: answerRows } = await db.execute({
+    sql: "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?",
+    args: [id],
+  });
 
   const answerMap: Record<string, string> = {};
-  for (const a of answers) {
-    answerMap[a.question_key] = a.answer;
+  for (const a of answerRows) {
+    answerMap[a.question_key as string] = a.answer as string;
   }
 
   const coverage = computeCoverage(answerMap);
@@ -131,11 +126,12 @@ export async function POST(
     .join("\n");
 
   // Save user message
-  db.prepare(
-    "INSERT INTO story_sessions (id, project_id, role, message) VALUES (?, ?, 'user', ?)"
-  ).run(uuid(), id, message);
+  await db.execute({
+    sql: "INSERT INTO story_sessions (id, project_id, role, message) VALUES (?, ?, ?, ?)",
+    args: [crypto.randomUUID(), id, "user", message],
+  });
 
-  // Call Claude
+  // Generate AI response
   const result = await generate({
     task: "story-session",
     chatHistory,
@@ -144,64 +140,55 @@ export async function POST(
     filledFields: filledLines || "(none yet)",
   });
 
-  // Parse response
   const { conversational, parsedFields } = parseStoryResponse(result);
 
-  // Save parsed fields to discovery_answers
+  // Upsert extracted fields into discovery_answers
   if (parsedFields && Object.keys(parsedFields).length > 0) {
-    const upsert = db.prepare(`
-      INSERT INTO discovery_answers (id, project_id, step_number, question_key, answer)
-      VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(project_id, question_key) DO UPDATE SET
-        answer = excluded.answer,
-        step_number = excluded.step_number
-    `);
+    const stmts: Array<{ sql: string; args: (string | number)[] }> = [];
 
-    const saveAll = db.transaction(
-      (items: Array<{ key: string; value: string; step: number }>) => {
-        for (const item of items) {
-          upsert.run(uuid(), id, item.step, item.key, item.value);
-        }
-      }
-    );
-
-    const items: Array<{ key: string; value: string; step: number }> = [];
     for (const [key, value] of Object.entries(parsedFields)) {
       if (typeof value === "string" && value.trim() && KEY_TO_STEP[key]) {
-        items.push({ key, value: value.trim(), step: KEY_TO_STEP[key] });
+        stmts.push({
+          sql: `INSERT INTO discovery_answers (id, project_id, step_number, question_key, answer)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(project_id, question_key) DO UPDATE SET answer = ?, step_number = ?`,
+          args: [crypto.randomUUID(), id, KEY_TO_STEP[key], key, value.trim(), value.trim(), KEY_TO_STEP[key]],
+        });
       }
     }
 
-    if (items.length > 0) {
-      saveAll(items);
-      db.prepare(
-        "UPDATE projects SET updated_at = datetime('now') WHERE id = ?"
-      ).run(id);
+    if (stmts.length > 0) {
+      stmts.push({
+        sql: "UPDATE projects SET updated_at = datetime('now') WHERE id = ?",
+        args: [id],
+      });
+      await db.batch(stmts, "write");
     }
   }
 
   // Save assistant message
-  db.prepare(
-    "INSERT INTO story_sessions (id, project_id, role, message, parsed_fields) VALUES (?, ?, 'assistant', ?, ?)"
-  ).run(
-    uuid(),
-    id,
-    conversational,
-    parsedFields && Object.keys(parsedFields).length > 0
-      ? JSON.stringify(parsedFields)
-      : null
-  );
+  await db.execute({
+    sql: "INSERT INTO story_sessions (id, project_id, role, message, parsed_fields) VALUES (?, ?, ?, ?, ?)",
+    args: [
+      crypto.randomUUID(),
+      id,
+      "assistant",
+      conversational,
+      parsedFields && Object.keys(parsedFields).length > 0
+        ? JSON.stringify(parsedFields)
+        : null,
+    ],
+  });
 
-  // Recompute coverage
-  const updatedAnswers = db
-    .prepare(
-      "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?"
-    )
-    .all(id) as Array<{ question_key: string; answer: string }>;
+  // Recompute coverage with updated answers
+  const { rows: updatedAnswerRows } = await db.execute({
+    sql: "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?",
+    args: [id],
+  });
 
   const updatedMap: Record<string, string> = {};
-  for (const a of updatedAnswers) {
-    updatedMap[a.question_key] = a.answer;
+  for (const a of updatedAnswerRows) {
+    updatedMap[a.question_key as string] = a.answer as string;
   }
   const updatedCoverage = computeCoverage(updatedMap);
 

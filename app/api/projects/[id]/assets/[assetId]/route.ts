@@ -6,32 +6,33 @@ export async function GET(
   { params }: { params: Promise<{ id: string; assetId: string }> }
 ) {
   const { id, assetId } = await params;
-  const db = getDb();
+  const db = await getDb();
 
-  const asset = db
-    .prepare("SELECT * FROM assets WHERE id = ? AND project_id = ?")
-    .get(assetId, id);
+  const { rows: assetRows } = await db.execute({
+    sql: "SELECT * FROM assets WHERE id = ? AND project_id = ?",
+    args: [assetId, id],
+  });
 
+  const asset = assetRows[0];
   if (!asset) {
     return NextResponse.json({ error: "Asset not found" }, { status: 404 });
   }
 
-  // Get all versions of the same type
-  const assetObj = asset as { asset_type: string };
-  const versions = db
-    .prepare(
-      "SELECT id, version, created_at FROM assets WHERE project_id = ? AND asset_type = ? ORDER BY version DESC"
-    )
-    .all(id, assetObj.asset_type);
+  const { rows: versions } = await db.execute({
+    sql: "SELECT id, version, created_at FROM assets WHERE project_id = ? AND asset_type = ? ORDER BY version DESC",
+    args: [id, asset.asset_type as string],
+  });
 
-  // Get conversation history
-  const conversations = db
-    .prepare(
-      "SELECT * FROM conversations WHERE asset_id = ? ORDER BY created_at ASC"
-    )
-    .all(assetId);
+  const { rows: conversations } = await db.execute({
+    sql: "SELECT * FROM conversations WHERE asset_id = ? ORDER BY created_at ASC",
+    args: [assetId],
+  });
 
-  return NextResponse.json({ asset, versions, conversations });
+  return NextResponse.json({
+    asset,
+    versions,
+    conversations,
+  });
 }
 
 export async function DELETE(
@@ -39,10 +40,10 @@ export async function DELETE(
   { params }: { params: Promise<{ id: string; assetId: string }> }
 ) {
   const { id, assetId } = await params;
-  const db = getDb();
-  db.prepare("DELETE FROM assets WHERE id = ? AND project_id = ?").run(
-    assetId,
-    id
-  );
+  const db = await getDb();
+  await db.execute({
+    sql: "DELETE FROM assets WHERE id = ? AND project_id = ?",
+    args: [assetId, id],
+  });
   return NextResponse.json({ ok: true });
 }

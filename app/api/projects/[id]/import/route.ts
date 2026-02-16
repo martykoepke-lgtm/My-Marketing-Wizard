@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generate } from "@/lib/claude";
-import { v4 as uuid } from "uuid";
 import { KEY_TO_STEP } from "@/lib/coverage";
 
 export async function POST(
@@ -27,7 +26,6 @@ export async function POST(
     );
   }
 
-  // Handle plan_steps array -> individual keys
   if (Array.isArray(parsed.plan_steps)) {
     const steps = parsed.plan_steps as string[];
     steps.forEach((step, i) => {
@@ -36,7 +34,6 @@ export async function POST(
     delete parsed.plan_steps;
   }
 
-  // Handle audiences array -> primary/secondary
   if (Array.isArray(parsed.audiences)) {
     const audiences = parsed.audiences as string[];
     if (audiences[0]) parsed.audience_primary = audiences[0];
@@ -44,46 +41,38 @@ export async function POST(
     delete parsed.audiences;
   }
 
-  // Map authority to authority_credentials
   if (parsed.authority && !parsed.authority_credentials) {
     parsed.authority_credentials = parsed.authority;
     delete parsed.authority;
   }
 
-  // Save to DB
-  const db = getDb();
-  const upsert = db.prepare(`
-    INSERT INTO discovery_answers (id, project_id, step_number, question_key, answer)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(project_id, question_key) DO UPDATE SET
-      answer = excluded.answer,
-      step_number = excluded.step_number
-  `);
+  const db = await getDb();
 
-  const saveAll = db.transaction(
-    (items: Array<{ key: string; value: string; step: number }>) => {
-      for (const item of items) {
-        upsert.run(uuid(), id, item.step, item.key, item.value);
-      }
-    }
-  );
+  const stmts: Array<{ sql: string; args: (string | number)[] }> = [];
+  let savedCount = 0;
 
-  const items: Array<{ key: string; value: string; step: number }> = [];
   for (const [key, value] of Object.entries(parsed)) {
     if (typeof value === "string" && value.trim() && KEY_TO_STEP[key]) {
-      items.push({ key, value: value.trim(), step: KEY_TO_STEP[key] });
+      stmts.push({
+        sql: `INSERT INTO discovery_answers (id, project_id, step_number, question_key, answer)
+              VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(project_id, question_key) DO UPDATE SET answer = ?, step_number = ?`,
+        args: [crypto.randomUUID(), id, KEY_TO_STEP[key], key, value.trim(), value.trim(), KEY_TO_STEP[key]],
+      });
+      savedCount++;
     }
   }
 
-  if (items.length > 0) {
-    saveAll(items);
-    db.prepare(
-      "UPDATE projects SET updated_at = datetime('now') WHERE id = ?"
-    ).run(id);
+  if (stmts.length > 0) {
+    stmts.push({
+      sql: "UPDATE projects SET updated_at = datetime('now') WHERE id = ?",
+      args: [id],
+    });
+    await db.batch(stmts, "write");
   }
 
   return NextResponse.json({
     extracted: parsed,
-    saved: items.length,
+    saved: savedCount,
   });
 }

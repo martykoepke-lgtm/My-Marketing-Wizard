@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generate } from "@/lib/claude";
-import { v4 as uuid } from "uuid";
 import type { AssetType } from "@/lib/prompts";
 
 const ASSET_LABELS: Record<string, string> = {
@@ -45,15 +44,25 @@ export async function GET(
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
-  const db = getDb();
-  const assets = db
-    .prepare(
-      `SELECT a.*,
-        (SELECT COUNT(*) FROM assets a2 WHERE a2.project_id = a.project_id AND a2.asset_type = a.asset_type) as version_count
-      FROM assets a WHERE a.project_id = ? ORDER BY a.created_at DESC`
-    )
-    .all(id);
-  return NextResponse.json(assets);
+  const db = await getDb();
+
+  const { rows: assets } = await db.execute({
+    sql: "SELECT * FROM assets WHERE project_id = ? ORDER BY created_at DESC",
+    args: [id],
+  });
+
+  const typeCounts: Record<string, number> = {};
+  for (const a of assets) {
+    const t = a.asset_type as string;
+    typeCounts[t] = (typeCounts[t] || 0) + 1;
+  }
+
+  const result = assets.map((a) => ({
+    ...a,
+    version_count: typeCounts[a.asset_type as string] || 0,
+  }));
+
+  return NextResponse.json(result);
 }
 
 export async function POST(
@@ -62,38 +71,37 @@ export async function POST(
 ) {
   const { id } = await params;
   const { asset_type, platform } = await request.json();
-  const db = getDb();
+  const db = await getDb();
 
   // Get brandscript
-  const bs = db
-    .prepare(
-      "SELECT content_json FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1"
-    )
-    .get(id) as { content_json: string } | undefined;
+  const { rows: bsRows } = await db.execute({
+    sql: "SELECT content_json FROM brandscripts WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+    args: [id],
+  });
 
   let brandscript: Record<string, unknown> = {};
-  if (bs) {
-    try {
-      brandscript = JSON.parse(bs.content_json);
-    } catch {}
+  if (bsRows[0]) {
+    const raw = bsRows[0].content_json as string;
+    try { brandscript = JSON.parse(raw); } catch { /* empty */ }
   }
 
   // Get discovery answers
-  const answers = db
-    .prepare("SELECT question_key, answer FROM discovery_answers WHERE project_id = ?")
-    .all(id) as Array<{ question_key: string; answer: string }>;
+  const { rows: answerRows } = await db.execute({
+    sql: "SELECT question_key, answer FROM discovery_answers WHERE project_id = ?",
+    args: [id],
+  });
 
   const discoveryMap: Record<string, string> = {};
-  for (const a of answers) {
-    discoveryMap[a.question_key] = a.answer;
+  for (const a of answerRows) {
+    discoveryMap[a.question_key as string] = a.answer as string;
   }
 
   // Count existing versions
-  const versionCount = db
-    .prepare(
-      "SELECT COUNT(*) as count FROM assets WHERE project_id = ? AND asset_type = ?"
-    )
-    .get(id, asset_type) as { count: number };
+  const { rows: countRows } = await db.execute({
+    sql: "SELECT COUNT(*) as cnt FROM assets WHERE project_id = ? AND asset_type = ?",
+    args: [id, asset_type],
+  });
+  const versionCount = Number(countRows[0]?.cnt ?? 0);
 
   const prompt = ASSET_PROMPTS[asset_type] || `Generate a ${asset_type} asset.`;
   const platformNote = platform ? ` Target platform: ${platform}.` : "";
@@ -107,24 +115,16 @@ export async function POST(
     userMessage: prompt + platformNote,
   });
 
-  const assetId = uuid();
-  db.prepare(
-    "INSERT INTO assets (id, project_id, asset_type, title, content, version) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(
-    assetId,
-    id,
-    asset_type,
-    ASSET_LABELS[asset_type] || asset_type,
-    result,
-    versionCount.count + 1
-  );
-
-  return NextResponse.json({
-    id: assetId,
-    project_id: id,
-    asset_type,
-    title: ASSET_LABELS[asset_type] || asset_type,
-    content: result,
-    version: versionCount.count + 1,
+  const assetId = crypto.randomUUID();
+  await db.execute({
+    sql: "INSERT INTO assets (id, project_id, asset_type, title, content, version) VALUES (?, ?, ?, ?, ?, ?)",
+    args: [assetId, id, asset_type, ASSET_LABELS[asset_type] || asset_type, result, versionCount + 1],
   });
+
+  const { rows } = await db.execute({
+    sql: "SELECT * FROM assets WHERE id = ?",
+    args: [assetId],
+  });
+
+  return NextResponse.json(rows[0]);
 }
