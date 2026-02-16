@@ -2,30 +2,7 @@ import { NextResponse } from "next/server";
 import { getDb } from "@/lib/db";
 import { generate } from "@/lib/claude";
 import { v4 as uuid } from "uuid";
-
-const KEY_TO_STEP: Record<string, number> = {
-  business_name: 1,
-  business_description: 1,
-  audience_primary: 2,
-  audience_secondary: 2,
-  customer_desire: 2,
-  external_problem: 3,
-  internal_problem: 3,
-  philosophical_problem: 3,
-  villain: 3,
-  empathy_statement: 4,
-  authority_credentials: 4,
-  plan_step_1: 5,
-  plan_step_2: 5,
-  plan_step_3: 5,
-  failure_state: 6,
-  success_state: 6,
-  origin_struggle: 7,
-  origin_tool: 7,
-  origin_mission: 7,
-  differentiator: 8,
-  main_objection: 8,
-};
+import { KEY_TO_STEP } from "@/lib/coverage";
 
 export async function POST(
   request: Request,

@@ -52,5 +52,15 @@ export function initSchema(db: Database.Database) {
       FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
       FOREIGN KEY (asset_id) REFERENCES assets(id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS story_sessions (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      role TEXT NOT NULL,
+      message TEXT NOT NULL,
+      parsed_fields TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+    );
   `);
 }

@@ -4,7 +4,7 @@ import { getPromptForTask, type AssetType } from "./prompts";
 const client = new Anthropic();
 
 interface GenerateOptions {
-  task: "brandscript" | "asset" | "refine" | "import";
+  task: "brandscript" | "asset" | "refine" | "import" | "story-session";
   assetType?: AssetType;
   discoveryAnswers?: Record<string, string>;
   brandscript?: Record<string, unknown>;
@@ -12,6 +12,8 @@ interface GenerateOptions {
   chatHistory?: Array<{ role: "user" | "assistant"; content: string }>;
   userMessage: string;
   platform?: string;
+  coverageGaps?: string;
+  filledFields?: string;
 }
 
 export async function generate(options: GenerateOptions): Promise<string> {

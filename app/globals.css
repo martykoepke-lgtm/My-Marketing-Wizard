@@ -46,3 +46,27 @@ body {
     transform: translateX(0);
   }
 }
+
+.chat-message-enter {
+  animation: chatFadeIn 0.2s ease-out;
+}
+
+@keyframes chatFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.coverage-pulse {
+  animation: coveragePulse 0.6s ease-out;
+}
+
+@keyframes coveragePulse {
+  0% { background-color: var(--color-brand-100); }
+  100% { background-color: transparent; }
+}
