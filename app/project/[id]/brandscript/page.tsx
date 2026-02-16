@@ -67,11 +67,27 @@ export default function BrandScriptPage() {
 
   function renderValue(value: unknown): string {
     if (typeof value === "string") return value;
-    if (Array.isArray(value)) return value.map((v, i) => `${i + 1}. ${v}`).join("\n");
+    if (Array.isArray(value)) {
+      return value
+        .map((v, i) => {
+          if (typeof v === "string") return `${i + 1}. ${v}`;
+          if (typeof v === "object" && v !== null) {
+            return `${i + 1}. ${Object.values(v).join(" — ")}`;
+          }
+          return `${i + 1}. ${String(v)}`;
+        })
+        .join("\n");
+    }
     if (typeof value === "object" && value !== null) {
       return Object.entries(value)
-        .map(([k, v]) => `${k.charAt(0).toUpperCase() + k.slice(1)}: ${v}`)
-        .join("\n");
+        .map(([k, v]) => {
+          const label = k.charAt(0).toUpperCase() + k.slice(1);
+          if (typeof v === "string") return `**${label}:** ${v}`;
+          if (Array.isArray(v)) return `**${label}:**\n${renderValue(v)}`;
+          if (typeof v === "object" && v !== null) return `**${label}:**\n${renderValue(v)}`;
+          return `**${label}:** ${String(v)}`;
+        })
+        .join("\n\n");
     }
     return String(value);
   }
